@@ -1,4 +1,13 @@
 # from __future__ import division
+import os
+print("Current Working Directory:", os.getcwd())
+
+from .distribution_utils import DistributionClass
+from ..utils import *
+
+# import sys
+# sys.path.append("..")
+# from xgboostlss.utils import *
 
 import numpy as np
 from scipy.stats import rv_continuous, poisson, gamma, invgauss, norm
@@ -22,15 +31,19 @@ from pyro.distributions.util import is_identically_one, is_identically_zero
 
 class TweedieTorch(TorchDistribution):
     # how to add one more parameter? power p?????
+    # how to combine p and other mu phi???
     arg_constraints =  {
         "loc": constraints.positive,
-        "scale": constraints.positive
+        "scale": constraints.positive,
+        "power": constraints.positive
     }
     support = constraints
     has_rsample = True
 
-    def __init__(self, loc, scale, validate_args = False):
-        self.loc, self.scale = broadcast_all(loc, scale)
+    # def __init__(self, loc, scale, validate_args = False):
+    def __init__(self, loc, scale, power, validate_args = False):
+        self.loc, self.scale, self.power = broadcast_all(loc, scale, power)
+        # self.loc, self.scale = broadcast_all(loc, scale)
         super().__init__(self.loc.shape, validate_args=validate_args)
     
     def expand(self, batch_shape, _instance = None):
@@ -40,32 +53,42 @@ class TweedieTorch(TorchDistribution):
         batch_shape = torch.Size(batch_shape)
         new.loc = self.loc.expand(batch_shape)
         new.scale = self.scale.expand(batch_shape)
+        new.power = self.power.expand(batch_shape)
         super(TweedieTorch, new).__init__(batch_shape, validate_args=False)
         new._validate_args = self._validate_args
         return new
     
 
-    def log_prob(self, x, p, mu, phi):
+    # def log_prob(self, x, p, mu, phi):
+    def log_prob(self, x):
+
         """
         log-likelihood as described on the related paper
         #  maybe we can turn all to pytorch version???
         # how about the parameter value? showing in previous version
         """
-        p = np.broadcast_to(p, x.shape)
-        mu = np.broadcast_to(mu, x.shape)
-        phi = np.broadcast_to(phi, x.shape)
+        # p = np.broadcast_to(p, x.shape)
+        # mu = np.broadcast_to(mu, x.shape)
+        # phi = np.broadcast_to(phi, x.shape)
+        p = np.broadcast_to(self.loc, x.shape)
+        mu = np.broadcast_to(self.scale, x.shape)
+        phi = np.broadcast_to(self.power, x.shape)
         return tweedie.estimate_tweedie_loglike_series(x, mu, phi, p)
     
     def rsample(self, sample_shape = torch.Size()):
+        ### you need to give the mu, p, phi
+        # endog = tweedie(mu=mu, p=1.5, phi=20).rvs(sample_shape)
+        endog = tweedie(self.loc, self.power, self.scale).rvs(sample_shape)
+        return endog
 
     @property
     def mean(self):
-        return self.loc
+        return self.mu
     
     @property
     def variance(self):
     ## not correct!!!!
-        return self.loc
+        return self.phi
 
 
 class Tweedie(DistributionClass):
@@ -124,7 +147,7 @@ class Tweedie(DistributionClass):
 
 
 class tweedie_gen(rv_continuous):
-    r"""A Tweedie continuous random variable
+    """A Tweedie continuous random variable
 
     Notes
     -----
