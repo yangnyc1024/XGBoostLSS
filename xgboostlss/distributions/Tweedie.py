@@ -43,6 +43,7 @@ class TweedieTorch(TorchDistribution):
     # def __init__(self, loc, scale, validate_args = False):
     def __init__(self, loc, scale, power, validate_args = False):
         self.loc, self.scale, self.power = broadcast_all(loc, scale, power)
+        # self.power = 1.6
         # self.loc, self.scale = broadcast_all(loc, scale)
         super().__init__(self.loc.shape, validate_args=validate_args)
     
@@ -53,7 +54,7 @@ class TweedieTorch(TorchDistribution):
         batch_shape = torch.Size(batch_shape)
         new.loc = self.loc.expand(batch_shape)
         new.scale = self.scale.expand(batch_shape)
-        new.power = self.power.expand(batch_shape)
+        # new.power = self.power.expand(batch_shape)
         super(TweedieTorch, new).__init__(batch_shape, validate_args=False)
         new._validate_args = self._validate_args
         return new
@@ -70,9 +71,9 @@ class TweedieTorch(TorchDistribution):
         # p = np.broadcast_to(p, x.shape)
         # mu = np.broadcast_to(mu, x.shape)
         # phi = np.broadcast_to(phi, x.shape)
-        p = np.broadcast_to(self.loc, x.shape)
-        mu = np.broadcast_to(self.scale, x.shape)
-        phi = np.broadcast_to(self.power, x.shape)
+        mu = np.broadcast_to(self.loc, x.shape)
+        phi = np.broadcast_to(self.scale, x.shape)
+        p = np.broadcast_to(self.power, x.shape)
         return tweedie.estimate_tweedie_loglike_series(x, mu, phi, p)
     
     def rsample(self, sample_shape = torch.Size()):
@@ -87,7 +88,6 @@ class TweedieTorch(TorchDistribution):
     
     @property
     def variance(self):
-    ## not correct!!!!
         return self.phi
 
 
