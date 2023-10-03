@@ -20,7 +20,7 @@ from scipy.special import gammaln, gammainc
 from scipy import optimize
 
 import torch
-from torch.distributions import constraints, Normal, Poisson, Gamma
+from torch.distributions import constraints
 from torch.distributions.utils import (
     broadcast_all,
     lazy_property,
@@ -75,20 +75,20 @@ class TweedieTorch(TorchDistribution):
         #  maybe we can turn all to pytorch version???
         # how about the parameter value? showing in previous version
         """
-        # mu = np.broadcast_to(self.loc, x.shape)
-        # phi = np.broadcast_to(self.scale, x.shape)
+        # p = np.broadcast_to(p, x.shape)
+        # mu = np.broadcast_to(mu, x.shape)
+        # phi = np.broadcast_to(phi, x.shape)
+        mu = np.broadcast_to(self.loc, x.shape)
+        phi = np.broadcast_to(self.scale, x.shape)
         # p = np.broadcast_to(self.power, x.shape)
         p = 1.6
-        mu = 2
-        phi = 1.5
-        return self.estimate_tweedie_loglike_series_torch(x, mu, phi, p)
+        return tweedie.estimate_tweedie_loglike_series(x, mu, phi, p)
     
     def rsample(self, sample_shape = torch.Size()):
-        # endog = tweedie(self.loc, self.power, self.scale).rvs(sample_shape)
+        ### you need to give the mu, p, phi
         p = 1.6
-        mu = 2
-        phi = 1.5
-        endog = self.rvs(p, mu, phi, sample_shape)
+        endog = tweedie(self.loc, 1.6, self.scale).rvs(sample_shape)
+        # endog = tweedie(self.loc, self.power, self.scale).rvs(sample_shape)
         return endog
 
     @property
@@ -98,204 +98,10 @@ class TweedieTorch(TorchDistribution):
     @property
     def variance(self):
         return self.scale
-    
-    def _rvs(self, p, mu, phi, size=None, random_state=None):
-        if size is None:
-            size = self._size
-        if random_state is None:
-            random_state = self._random_state
-        p = np.array(p, ndmin=1)
-        if not (p > 1).all() & (p < 2).all():
-            raise ValueError('p only valid for 1 < p < 2')
-        rate = est_kappa(mu, p) / phi
-        scale = est_gamma(phi, p, mu)
-        shape = -est_alpha(p)
-        N = poisson(rate).rvs(size=size, random_state=random_state)
-        mask = N > 0
-        if not np.isscalar(scale) and len(scale) == len(mask):
-            scale = scale[mask]
-        if not np.isscalar(shape) and len(shape) == len(mask):
-            shape = shape[mask]
 
-        rvs = gamma(
-                a=N[mask] * shape,
-            scale=scale).rvs(size=np.sum(mask), random_state=random_state)
-        rvs2 = np.zeros(N.shape, dtype=rvs.dtype)
-        rvs2[mask] = rvs
-        return rvs2
-
-    def estimate_tweedie_loglike_series_torch(self, x, mu, phi, p):
-        """Estimate the loglikihood of a given set of x, mu, phi, and p
-
-        Parameters
-        ----------
-        x : array
-            The observed values. Must be non-negative.
-        mu : array
-            The fitted values. Must be positive.
-        phi : array
-            The scale paramter. Must be positive.
-        p : array
-            The Tweedie variance power. Must equal 0 or must be greater than or
-            equal to 1.
-
-        Returns
-        -------
-        estiate_tweedie_loglike_series : float
-        """
-        x = np.array(x, ndmin=1)
-        mu = np.array(mu, ndmin=1)
-        phi = np.array(phi, ndmin=1)
-        p = np.array(p, ndmin=1)
-
-        ll = np.ones_like(x) * -np.inf
-
-        # # Gaussian (Normal)
-        # gaussian_mask = p == 0.
-        # if np.sum(gaussian_mask) > 0:
-        #     ll[gaussian_mask] = norm(
-        #             loc=mu[gaussian_mask],
-        #             scale=np.sqrt(phi[gaussian_mask])).logpdf(x[gaussian_mask])
-
-        # # Poisson
-        # poisson_mask = p == 1.
-        # if np.sum(poisson_mask) > 0:
-        #     poisson_pdf = poisson(
-        #             mu=mu[poisson_mask] / phi[poisson_mask]).pmf(
-        #             x[poisson_mask] / phi[poisson_mask]) / phi[poisson_mask]
-        #     zero_mask = poisson_pdf != 0.
-        #     poisson_logpdf = ll[poisson_mask]
-        #     poisson_logpdf[zero_mask] = np.log(poisson_pdf[zero_mask])
-        #     ll[poisson_mask] = poisson_logpdf
-
-        # 1 < p < 2
-        ll_1to_2_mask = (1 < p) & (p < 2)
-        if np.sum(ll_1to_2_mask) > 0:
-            # Calculating logliklihood at x == 0 is pretty straightforward
-            zeros = x == 0
-            mask = zeros & ll_1to_2_mask
-            ll[mask] = -(mu[mask] ** (2 - p[mask]) / (phi[mask] * (2 - p[mask])))
-            mask = ~zeros & ll_1to_2_mask
-            ll[mask] = self.ll_1to2(x[mask], mu[mask], phi[mask], p[mask])
-
-        # # Gamma
-        # gamma_mask = p == 2
-        # if np.sum(gamma_mask) > 0:
-        #     ll[gamma_mask] = gamma(a=1/phi, scale=phi * mu).logpdf(x[gamma_mask])
-
-        # # (2 < p < 3) or (p > 3)
-        # ll_2plus_mask = ((2 < p) & (p < 3)) | (p > 3)
-        # if np.sum(ll_2plus_mask) > 0:
-        #     zeros = x == 0
-        #     mask = zeros & ll_2plus_mask
-        #     ll[mask] = -np.inf
-        #     mask = ~zeros & ll_2plus_mask
-        #     ll[mask] = ll_2orMore(x[mask], mu[mask], phi[mask], p[mask])
-
-        # # Inverse Gaussian (Normal)
-        # invgauss_mask = p == 3
-        # if np.sum(invgauss_mask) > 0:
-        #     cond1 = invgauss_mask
-        #     cond2 = x > 0
-        #     mask = cond1 & cond2
-        #     ll[mask] = invgauss(
-        #             mu=mu[mask] * phi[mask],
-        #             scale=1. / phi[mask]).logpdf(x[mask])
-        return ll
-
-    def ll_1to2(self, x, mu, phi, p):
-
-        def est_z(x, phi, p):
-            alpha = est_alpha(p)
-            numerator = x ** (-alpha) * (p - 1) ** alpha
-            denominator = phi ** (1 - alpha) * (2 - p)
-            return numerator / denominator
-
-        def est_theta(mu, p):
-            theta = np.where(
-                p == 1,
-                np.log(mu),
-                mu ** (1 - p) / (1 - p)
-            )
-            return theta
-
-        def est_kappa(mu, p):
-            kappa = np.where(
-                p == 2,
-                np.log(mu),
-                mu ** (2 - p) / (2 - p)
-            )
-            return kappa
-
-        def est_gamma(phi, p, mu):
-            mu = np.array(mu, dtype=float)
-            return phi * (p - 1) * mu ** (p - 1)
-
-        def est_alpha(p):
-            return (2 - p) / (1 - p)
-
-
-        def est_jmax(x, p, phi):
-            return x ** (2 - p) / (phi * (2 - p))
-
-
-        def est_kmax(x, p, phi):
-            return x ** (2 - p) / (phi * (p - 2))
-
-        if len(x) == 0:
-            return 0
-
-        theta = est_theta(mu, p)
-        kappa = est_kappa(mu, p)
-        alpha = est_alpha(p)
-        z = est_z(x, phi, p)
-        constant_logW = np.max(np.log(z)) + (1 - alpha) + alpha * np.log(-alpha)
-        jmax = est_jmax(x, p, phi)
-
-        # Start at the biggiest jmax and move to the right
-        j = max(1, jmax.max())
-
-        def _logW(alpha, j, constant_logW):
-            # Is the 1 - alpha backwards in the paper? I think so.
-            logW = (j * (constant_logW - (1 - alpha) * np.log(j)) -
-                    np.log(2 * np.pi) - 0.5 * np.log(-alpha) - np.log(j))
-            return logW
-
-        def _logWmax(alpha, j):
-            logWmax = (j * (1 - alpha) - np.log(2 * np.pi) -
-                    0.5 * np.log(-alpha) - np.log(j))
-            return logWmax
-
-        # e ** -37 is approxmiately the double precision on 64-bit systems.
-        # So we just need to calcuate logW whenever its within 37 of logWmax.
-        logWmax = _logWmax(alpha, j)
-        while np.any(logWmax - _logW(alpha, j, constant_logW) < 37):
-            j += 1
-        j_hi = np.ceil(j)
-
-        j = max(1, jmax.min())
-        logWmax = _logWmax(alpha, j)
-
-        while (np.any(logWmax - _logW(alpha, j, constant_logW) < 37) and
-            np.all(j > 1)):
-            j -= 1
-        j_low = np.ceil(j)
-
-        j = np.arange(j_low, j_hi + 1, dtype=np.float64)
-        w1 = np.tile(j, (z.shape[0], 1))
-
-        w1 *= np.log(z)[:, np.newaxis]
-        w1 -= gammaln(j + 1)
-        logW = w1 - gammaln(-alpha[:, np.newaxis] * j)
-
-        logWmax = np.max(logW, axis=1)
-        w = np.exp(logW - logWmax[:, np.newaxis]).sum(axis=1)
-
-        return (logWmax + np.log(w) - np.log(x) + (((x * theta) - kappa) / phi))
 
 test = TweedieTorch(1, 2)
-print(test.log_prob(5))
-print(test.rsample(5))
+print(test.log_prob(1))
 
 
 class Tweedie(DistributionClass):
@@ -351,7 +157,8 @@ class Tweedie(DistributionClass):
                          distribution_arg_names=list(param_dict.keys()),
                          loss_fn=loss_fn
                          )
-                    
+
+
 class tweedie_gen(rv_continuous):
     """A Tweedie continuous random variable
 
