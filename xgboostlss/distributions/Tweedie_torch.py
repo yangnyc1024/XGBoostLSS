@@ -75,12 +75,9 @@ class TweedieTorch(TorchDistribution):
         #  maybe we can turn all to pytorch version???
         # how about the parameter value? showing in previous version
         """
-        # mu = np.broadcast_to(self.loc, x.shape)
-        # phi = np.broadcast_to(self.scale, x.shape)
-        # p = np.broadcast_to(self.power, x.shape)
-        mu = 1.5
-        phi = 3
-        p = 1.5
+        mu = np.broadcast_to(self.loc, x.shape)
+        phi = np.broadcast_to(self.scale, x.shape)
+        p = np.broadcast_to(self.power, x.shape)
         return self.estimate_tweedie_loglike_series_torch(x, mu, phi, p)
 
     @property
@@ -117,6 +114,7 @@ class TweedieTorch(TorchDistribution):
         p = np.array(p, ndmin=1)
 
         ll = np.ones_like(x) * -np.inf
+        print(ll)
 
         # # Gaussian (Normal)
         # gaussian_mask = p == 0.
@@ -172,6 +170,7 @@ class TweedieTorch(TorchDistribution):
         return ll
 
     def ll_1to2(self, x, mu, phi, p):
+        # parameter all are np.array
 
         def est_z(x, phi, p):
             alpha = est_alpha(p)
@@ -258,44 +257,117 @@ class TweedieTorch(TorchDistribution):
         w = np.exp(logW - logWmax[:, np.newaxis]).sum(axis=1)
 
         return (logWmax + np.log(w) - np.log(x) + (((x * theta) - kappa) / phi))
-    
 
-    def rsample(self, sample_shape = torch.Size()):
-        # endog = tweedie(self.loc, self.power, self.scale).rvs(sample_shape)
-        p = 1.6
-        mu = 2
-        phi = 1.5
-        endog = self.rvs(p, mu, phi, sample_shape)
-        return endog
+    def ll_1to2_torch(self, x, mu, phi, p):
+        # parameter all are np.array
 
-    def rvs(self, p, mu, phi, size=None, random_state=None):
-        if size is None:
-            size = self._size
-        if random_state is None:
-            random_state = self._random_state
-        p = np.array(p, ndmin=1)
-        if not (p > 1).all() & (p < 2).all():
-            raise ValueError('p only valid for 1 < p < 2')
-        rate = est_kappa(mu, p) / phi
-        scale = est_gamma(phi, p, mu)
-        shape = -est_alpha(p)
-        N = poisson(rate).rvs(size=size, random_state=random_state)
-        mask = N > 0
-        if not np.isscalar(scale) and len(scale) == len(mask):
-            scale = scale[mask]
-        if not np.isscalar(shape) and len(shape) == len(mask):
-            shape = shape[mask]
+        def est_z(x, phi, p):
+            alpha = est_alpha(p)
+            numerator = torch.pow(x, -alpha) * torch.pow(p - 1, alpha)
+            denominator = torch.pow(phi, 1 - alpha) * (2 - p)
+            return numerator / denominator
 
-        rvs = gamma(
-                a=N[mask] * shape,
-            scale=scale).rvs(size=np.sum(mask), random_state=random_state)
-        rvs2 = np.zeros(N.shape, dtype=rvs.dtype)
-        rvs2[mask] = rvs
-        return rvs2
+        def est_theta(mu, p):
+            theta = torch.where(
+            p == 1,
+            torch.log(mu),
+            torch.pow(mu, 1 - p) / (1 - p)
+            )
+            return theta
+
+
+        def est_kappa(mu, p):
+            kappa = torch.where(
+                p == 2,
+                torch.log(mu),
+                torch.pow(mu, 2 - p) / (2 - p)
+            )
+            return kappa
+
+        def est_gamma(phi, p, mu):
+            mu = mu.float()
+            return phi * (p - 1) * torch.pow(mu, p - 1)
+
+        def est_alpha(p):
+            return (2 - p) / (1 - p)
+
+        def est_jmax(x, p, phi):
+            return torch.pow(x, 2 - p) / (phi * (2 - p))
+
+        def est_kmax(x, p, phi):
+            return torch.pow(x, 2 - p) / (phi * (p - 2))
+
+        if len(x) == 0:
+            return 0
+
+        theta = est_theta(mu, p)
+        kappa = est_kappa(mu, p)
+        alpha = est_alpha(p)
+        z = est_z(x, phi, p)
+        constant_logW = torch.max(np.log(z)) + (1 - alpha) + alpha * torch.log(-alpha)
+        jmax = est_jmax(x, p, phi)
+
+        # Start at the biggiest jmax and move to the right
+
+
+        j = max(1, jmax.max().item())
+        def _logW(alpha, j, constant_logW):
+            logW = (j * (constant_logW - (1 - alpha) * torch.log(torch.tensor(j, dtype=torch.float32))) - 
+                    torch.log(torch.tensor(2 * np.pi, dtype=torch.float32)) - 0.5 * torch.log(-alpha) - torch.log(torch.tensor(j, dtype=torch.float32)))
+            return logW
+
+        def _logWmax(alpha, j):
+            logWmax = (j * (1 - alpha) - torch.log(torch.tensor(2 * np.pi, dtype=torch.float32)) - 
+                0.5 * torch.log(-alpha) - torch.log(torch.tensor(j, dtype=torch.float32)))
+            return logWmax
+
+        # e ** -37 is approxmiately the double precision on 64-bit systems.
+        # So we just need to calcuate logW whenever its within 37 of logWmax.
+        logWmax = _logWmax(alpha, j)
+        while (logWmax - _logW(alpha, j, constant_logW)).any() < 37:
+            print((logWmax - _logW(alpha, j, constant_logW)).any())
+            j += 1
+        j_hi = torch.ceil(torch.tensor(j, dtype=torch.float32))
+
+        j = max(1, jmax.min().item())
+        logWmax = _logWmax(alpha, j)
+
+        while ((logWmax - _logW(alpha, j, constant_logW)).any() < 37) and (j > 1).all():
+            j -= 1
+        j_low = torch.ceil(torch.tensor(j, dtype=torch.float32))
+
+        j = torch.arange(j_low, j_hi + 1, dtype=torch.float64)
+        w1 = j.repeat(x.shape[0], 1)
+
+        w1 *= torch.log(z).unsqueeze(1)
+        w1 -= torch.lgamma(j + 1)
+        logW = w1 - torch.lgamma(-alpha.unsqueeze(1) * j)
+
+        logWmax = torch.max(logW, dim=1).values
+        w = torch.exp(logW - logWmax.unsqueeze(1)).sum(dim=1)
+
+        return (logWmax + torch.log(w) - torch.log(x) + (((x * theta) - kappa) / phi))
+
 
 test = TweedieTorch(1, 2, 1.5)
-print(test.log_prob(10))
-# print(test.rsample(5))
+# print(test.log_prob([]))
+x1 = [10, 20, 30]
+array_x1 = np.array(x1, ndmin=1)
+x2 = 1.5
+array_x2 = np.array(x2, ndmin=1)
+x3 = 1.5
+array_x3 = np.array(x3, ndmin=1)
+x4 = 1.5
+array_x4 = np.array(x4, ndmin=1)
+print(test.ll_1to2(array_x1, array_x2, array_x3, array_x4))
+
+
+x = torch.tensor([10, 20, 30], dtype=torch.float32)
+mu = torch.tensor([1.5], dtype=torch.float32)
+phi = torch.tensor([1.5], dtype=torch.float32)
+p = torch.tensor([1.5], dtype=torch.float32)
+print(test.ll_1to2_torch(x, mu, phi, p))
+
 
 
 class Tweedie(DistributionClass):
